@@ -1,0 +1,72 @@
+#+TITLE: Value-Per-Acre Mapper
+#+AUTHOR: RJ Sheperd
+
+** 0. Setup
+
+Be sure you have installed:
+- [[https://docker.com/][Docker]]
+- [[https://gdal.org/][GDAL]]
+- [[https://jqlang.github.io/jq/][jq]]
+- [[https://babashka.org/][Babashka]]
+
+** 1. Find your Data
+
+*** ArcGIS Servers
+
+
+*** Combine GeoJSON
+Using `jq`, we can combine the multiple GeoJSON files like so:
+
+#+BEGIN_SRC bash
+  jq '{"type": "FeatureCollection", "features": [.[] | .features[]]}' --slurp bend-taxlots/*.geojson > bend-taxlots.geojson
+#+END_SRC
+
+#+RESULTS:
+
+** 2. PostGIS Setup
+
+*** Start PostGIS Server
+#+BEGIN_SRC bash
+  docker run --name my-postgis \
+	 -e POSTGRES_PASSWORD=taxlots \
+	 -p 5432:5432 \
+	 -v /usr/local/var/postgres/data:/var/lib/postgresql/data \
+	 -d postgis/postgis:16-3.4
+#+END_SRC
+
+*** Create Taxlots DB
+
+#+BEGIN_SRC bash
+  PGPASSWORD="taxlots" psql -h localhost -p 5432 --user postgres << EOF 
+  -- Create a Database and User with all permissions called 'taxlots'
+  CREATE DATABASE taxlots;
+  \c taxlots
+  CREATE USER taxlots;
+  GRANT ALL PRIVILEGES ON DATABASE taxlots TO taxlots;
+
+  -- Add PostGIS Extensions
+  CREATE EXTENSION IF NOT EXISTS postgis;
+  CREATE EXTENSION IF NOT EXISTS postgis_topology;
+  CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
+  EOF
+#+END_SRC
+
+*** COMMENT R Example
+#+BEGIN_SRC 
+library(httr)
+library(sf)
+library(tmap)
+
+url <- parse_url("https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services")
+url$path <- paste(url$path, "USA_Railroads_1/FeatureServer/0/query", sep = "/")
+url$query <- list(where = "STATE = 'FL'",
+                  outFields = "*",
+                  returnGeometry = "true",
+                  f = "geojson")
+request <- build_url(url)
+
+Florida_Railroads <- st_read(request)
+
+tmap_mode(mode = "view")
+tm_shape(Florida_Railroads)+tm_lines(col="NET_DESC", palette = "Set1", lwd = 5)‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍
+#+END_SRC
