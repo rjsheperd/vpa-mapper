@@ -4,69 +4,69 @@
 ** 0. Setup
 
 Be sure you have installed:
-- [[https://docker.com/][Docker]]
 - [[https://gdal.org/][GDAL]]
-- [[https://jqlang.github.io/jq/][jq]]
-- [[https://babashka.org/][Babashka]]
+- [[https://www.r-project.org/][R]]
 
 ** 1. Find your Data
 
-*** ArcGIS Servers
+This may take some time. You can typically find the best results
+searching
+~<City/County> GIS Open Data Portal~ or
+~<City/County> Taxlots Data~.
 
+Ideally you are able to find an online map that is backed by an ArcGIS Online (AGOL) Feature Server that hosts this data.
 
-*** Combine GeoJSON
-Using `jq`, we can combine the multiple GeoJSON files like so:
+Here's an example of the page you're looking for: [[https://www.arcgis.com/home/item.html?id=901cdd4a5ca24cc3b72cc8e3e0f11f02][Bend Count Taxlots]]. You will want to take note of the URL ending in `/FeatureServer`.
 
-#+BEGIN_SRC bash
-  jq '{"type": "FeatureCollection", "features": [.[] | .features[]]}' --slurp bend-taxlots/*.geojson > bend-taxlots.geojson
-#+END_SRC
+** 2. Bring it into R
 
-#+RESULTS:
+*** Value-Per-Acre in R
+#+BEGIN_SRC R :tangle vpa.R
+  library(httr)
+  library(sf)
+  library(units)
+  library(dplyr)
+  library(leaflet)
 
-** 2. PostGIS Setup
+  ## Get Taxlots Geometry
+  url <- parse_url("https://services1.arcgis.com/znO8Hz1SuVVohYhZ/arcgis/rest/services/Taxlots/FeatureServer/0/query")
+  url$query <- list(where = "1=1",
+		    outFields = "*",
+		    returnGeometry = "true",
+		    f = "geojson")
+  request <- build_url(url)
 
-*** Start PostGIS Server
-#+BEGIN_SRC bash
-  docker run --name my-postgis \
-	 -e POSTGRES_PASSWORD=taxlots \
-	 -p 5432:5432 \
-	 -v /usr/local/var/postgres/data:/var/lib/postgresql/data \
-	 -d postgis/postgis:16-3.4
-#+END_SRC
+  taxlots_wgs84 <- st_read(request)
 
-*** Create Taxlots DB
+  ## Calculate Area
+  taxlots <- st_transform(taxlots_wgs84, crs=2992)
+  taxlots$area <- units::set_units(st_area(taxlots), "acres")
+  taxlots <- rename(taxlots, Taxlot = TAXLOT)
+  taxlots <- taxlots[, c("Taxlot", "PARCEL", "area")]
 
-#+BEGIN_SRC bash
-  PGPASSWORD="taxlots" psql -h localhost -p 5432 --user postgres << EOF 
-  -- Create a Database and User with all permissions called 'taxlots'
-  CREATE DATABASE taxlots;
-  \c taxlots
-  CREATE USER taxlots;
-  GRANT ALL PRIVILEGES ON DATABASE taxlots TO taxlots;
+  ## Get Taxlots Value
+  url <- parse_url("https://services1.arcgis.com/znO8Hz1SuVVohYhZ/arcgis/rest/services/Taxlots/FeatureServer/7/query")
+  url$query <- list(where = "1=1",
+		    outFields = "*",
+		    f = "pgeojson")
+  request <- build_url(url)
 
-  -- Add PostGIS Extensions
-  CREATE EXTENSION IF NOT EXISTS postgis;
-  CREATE EXTENSION IF NOT EXISTS postgis_topology;
-  CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
-  EOF
-#+END_SRC
+  assessed_value <- st_read(request)
+  assessed_value <- st_drop_geometry(assessed_value)
 
-*** COMMENT R Example
-#+BEGIN_SRC 
-library(httr)
-library(sf)
-library(tmap)
+  ## Merge
+  taxlots <- merge(taxlots, assessed_value[, c("Taxlot", "RMV_Land", "RMV_Impr", "RMV_Total", "AV_Total")], by="Taxlot")
+  taxlots$vpa <- taxlots$AV_Total / taxlots$area
+  taxlots$vpa <- drop_units(taxlots$vpa)
 
-url <- parse_url("https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services")
-url$path <- paste(url$path, "USA_Railroads_1/FeatureServer/0/query", sep = "/")
-url$query <- list(where = "STATE = 'FL'",
-                  outFields = "*",
-                  returnGeometry = "true",
-                  f = "geojson")
-request <- build_url(url)
+  ## Write to GeoPackage
+  taxlots <- st_transform(taxlots, crs=4326)
+  st_write(taxlots, "bend-vpa.gpkg")
 
-Florida_Railroads <- st_read(request)
+  ## Write to MBTiles
+  st_write(taxlots, "bend-vpa.mbtiles")
 
-tmap_mode(mode = "view")
-tm_shape(Florida_Railroads)+tm_lines(col="NET_DESC", palette = "Set1", lwd = 5)‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍‍
+  ## Convert to PMTiles
+  system("pmtiles convert bend-vpa.mbtiles bend-vpa.pmtiles")
+
 #+END_SRC
